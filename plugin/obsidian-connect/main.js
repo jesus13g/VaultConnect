@@ -11,8 +11,9 @@ const {
 
 const SIDEBAR_VIEW_TYPE = "obsidian-connect-sidebar";
 
+const BACKEND_URL = "https://backend-production-13e05.up.railway.app/";
+
 const DEFAULT_SETTINGS = {
-  backendUrl: "http://localhost:8000",
   email: "",
   password: "",
   accessToken: "",
@@ -183,7 +184,8 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const saved = await this.loadData() || {};
+    this.settings = { ...DEFAULT_SETTINGS, ...saved };
     this.settings.excludedPrefixes = normalizeExcludedPrefixes(this.settings.excludedPrefixes);
     this.settings.localSnapshot = ensureObject(this.settings.localSnapshot);
     this.settings.remoteSnapshot = ensureObject(this.settings.remoteSnapshot);
@@ -236,7 +238,7 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
     const skipAuth = Boolean(options.skipAuth);
     const retried = Boolean(options.retried);
     const token = skipAuth ? "" : await this.ensureToken();
-    const url = buildUrl(this.settings.backendUrl, path, options.query);
+    const url = buildUrl(path, options.query);
 
     const headers = Object.assign(
       {
@@ -440,7 +442,7 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
   }
 
   openBackendWeb() {
-    const url = buildUrl(this.settings.backendUrl, "/", null);
+    const url = buildUrl("/", null);
     openExternalUrl(url);
     new Notice("Panel web abierto.");
   }
@@ -869,15 +871,29 @@ class ObsidianConnectSidebarView extends ItemView {
     // ── Header ─────────────────────────────────────────────────────
     const header = containerEl.createDiv({ cls: "oc-header" });
     const brand = header.createDiv({ cls: "oc-brand" });
-    brand.innerHTML = `<svg class="oc-brand-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>`;
+    brand.appendChild(makeSvg(15, 15, "0 0 24 24", 2.5, [
+      { tag: "path", d: "M12 2L2 7l10 5 10-5-10-5z" },
+      { tag: "path", d: "M2 17l10 5 10-5" },
+      { tag: "path", d: "M2 12l10 5 10-5" },
+    ], "oc-brand-icon"));
     brand.createEl("h4", { cls: "oc-brand-title", text: "obsidianConnect" });
 
     const headerActions = header.createDiv({ cls: "oc-header-actions" });
     const reloadBtn = headerActions.createEl("button", { cls: "oc-icon-btn" });
+    reloadBtn.setAttribute("aria-label", "Actualizar");
     reloadBtn.title = "Actualizar";
-    reloadBtn.innerHTML = this.fetching
-      ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="oc-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`
-      : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>`;
+    if (this.fetching) {
+      reloadBtn.appendChild(makeSvg(14, 14, "0 0 24 24", 2.5, [
+        { tag: "path", d: "M21 12a9 9 0 1 1-6.219-8.56" },
+      ], "oc-spin"));
+    } else {
+      reloadBtn.appendChild(makeSvg(14, 14, "0 0 24 24", 2.5, [
+        { tag: "path", d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" },
+        { tag: "path", d: "M21 3v5h-5" },
+        { tag: "path", d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" },
+        { tag: "path", d: "M8 16H3v5" },
+      ]));
+    }
     reloadBtn.addEventListener("click", () => this.loadAndRender());
 
     // ── Sin sesión ──────────────────────────────────────────────────
@@ -887,7 +903,11 @@ class ObsidianConnectSidebarView extends ItemView {
       loginSection.createEl("p", { cls: "oc-login-desc", text: "Inicia sesión para sincronizar tu bóveda con Google Drive." });
 
       const googleBtn = loginSection.createEl("button", { cls: "oc-login-btn oc-login-primary" });
-      googleBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v8m-4-4h8"/></svg> Iniciar sesión con Google`;
+      googleBtn.appendChild(makeSvg(15, 15, "0 0 24 24", 2, [
+        { tag: "circle", cx: "12", cy: "12", r: "10" },
+        { tag: "path", d: "M12 8v8m-4-4h8" },
+      ]));
+      googleBtn.appendChild(document.createTextNode(" Iniciar sesión con Google"));
       googleBtn.addEventListener("click", async () => {
         googleBtn.disabled = true;
         googleBtn.textContent = "Abriendo navegador...";
@@ -897,7 +917,11 @@ class ObsidianConnectSidebarView extends ItemView {
       });
 
       const emailBtn = loginSection.createEl("button", { cls: "oc-login-btn oc-login-secondary" });
-      emailBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg> Login con email`;
+      emailBtn.appendChild(makeSvg(15, 15, "0 0 24 24", 2, [
+        { tag: "rect", x: "2", y: "4", width: "20", height: "16", rx: "2" },
+        { tag: "path", d: "m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" },
+      ]));
+      emailBtn.appendChild(document.createTextNode(" Login con email"));
       emailBtn.addEventListener("click", async () => {
         emailBtn.disabled = true;
         await this.plugin.login();
@@ -910,11 +934,11 @@ class ObsidianConnectSidebarView extends ItemView {
     const connEl = containerEl.createDiv({ cls: "oc-connection" });
     const isConnected = this.connectionStatus && this.connectionStatus.status === "connected";
     if (isConnected) {
-      connEl.innerHTML = `<div class="oc-dot oc-dot-green"></div>`;
+      connEl.createDiv({ cls: "oc-dot oc-dot-green" });
       connEl.createEl("span", { text: "Drive: " });
       connEl.createEl("span", { cls: "oc-conn-email", text: this.connectionStatus.external_account_email || "conectado" });
     } else {
-      connEl.innerHTML = `<div class="oc-dot oc-dot-gray"></div>`;
+      connEl.createDiv({ cls: "oc-dot oc-dot-gray" });
       connEl.createEl("span", { text: "Google Drive no conectado" });
       const cBtn = connEl.createEl("button", { cls: "oc-connect-btn", text: "Conectar" });
       cBtn.addEventListener("click", async () => {
@@ -936,8 +960,14 @@ class ObsidianConnectSidebarView extends ItemView {
 
     const pushBtn = toolbar.createEl("button", { cls: "oc-action-btn" + (hasVault ? " oc-act-primary" : "") });
     pushBtn.disabled = !hasVault;
+    pushBtn.setAttribute("aria-label", "Subir cambios");
     pushBtn.title = hasVault ? "Subir cambios locales a Drive" : "Selecciona una bóveda primero";
-    pushBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg><span>Push</span>`;
+    pushBtn.appendChild(makeSvg(14, 14, "0 0 24 24", 2.5, [
+      { tag: "path", d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" },
+      { tag: "polyline", points: "17 8 12 3 7 8" },
+      { tag: "line", x1: "12", y1: "3", x2: "12", y2: "15" },
+    ]));
+    pushBtn.createEl("span", { text: "Push" });
     pushBtn.addEventListener("click", async () => {
       pushBtn.disabled = true;
       try { await this.plugin.pushVault(); } catch (e) { new Notice("Error: " + e.message); }
@@ -946,8 +976,14 @@ class ObsidianConnectSidebarView extends ItemView {
 
     const pullBtn = toolbar.createEl("button", { cls: "oc-action-btn" + (hasVault ? " oc-act-primary" : "") });
     pullBtn.disabled = !hasVault;
+    pullBtn.setAttribute("aria-label", "Descargar cambios");
     pullBtn.title = hasVault ? "Descargar cambios remotos" : "Selecciona una bóveda primero";
-    pullBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span>Pull</span>`;
+    pullBtn.appendChild(makeSvg(14, 14, "0 0 24 24", 2.5, [
+      { tag: "path", d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" },
+      { tag: "polyline", points: "7 10 12 15 17 10" },
+      { tag: "line", x1: "12", y1: "15", x2: "12", y2: "3" },
+    ]));
+    pullBtn.createEl("span", { text: "Pull" });
     pullBtn.addEventListener("click", async () => {
       pullBtn.disabled = true;
       try { await this.plugin.pullVault(); } catch (e) { new Notice("Error: " + e.message); }
@@ -955,8 +991,14 @@ class ObsidianConnectSidebarView extends ItemView {
     });
 
     const newBtn = toolbar.createEl("button", { cls: "oc-action-btn" });
+    newBtn.setAttribute("aria-label", "Crear bóveda");
     newBtn.title = "Crear bóveda en backend desde la vault actual";
-    newBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg><span>Nueva</span>`;
+    newBtn.appendChild(makeSvg(14, 14, "0 0 24 24", 2.5, [
+      { tag: "path", d: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" },
+      { tag: "line", x1: "12", y1: "11", x2: "12", y2: "17" },
+      { tag: "line", x1: "9", y1: "14", x2: "15", y2: "14" },
+    ]));
+    newBtn.createEl("span", { text: "Nueva" });
     newBtn.addEventListener("click", async () => {
       newBtn.disabled = true;
       try { await this.plugin.createBackendVaultFromCurrentVault(); await this.loadAndRender(); }
@@ -965,14 +1007,23 @@ class ObsidianConnectSidebarView extends ItemView {
     });
 
     const webBtn = toolbar.createEl("button", { cls: "oc-action-btn" });
+    webBtn.setAttribute("aria-label", "Abrir panel web");
     webBtn.title = "Abrir panel web del backend";
-    webBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg><span>Web</span>`;
+    webBtn.appendChild(makeSvg(14, 14, "0 0 24 24", 2.5, [
+      { tag: "circle", cx: "12", cy: "12", r: "10" },
+      { tag: "line", x1: "2", y1: "12", x2: "22", y2: "12" },
+      { tag: "path", d: "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" },
+    ]));
+    webBtn.createEl("span", { text: "Web" });
     webBtn.addEventListener("click", () => this.plugin.openBackendWeb());
 
     // ── Loading ────────────────────────────────────────────────────
     if (this.fetching) {
       const ldEl = containerEl.createDiv({ cls: "oc-empty" });
-      ldEl.innerHTML = `<svg class="oc-empty-icon oc-spin" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg><span>Cargando bóvedas...</span>`;
+      ldEl.appendChild(makeSvg(24, 24, "0 0 24 24", 2, [
+        { tag: "path", d: "M21 12a9 9 0 1 1-6.219-8.56" },
+      ], "oc-empty-icon oc-spin"));
+      ldEl.createEl("span", { text: "Cargando bóvedas..." });
       return;
     }
 
@@ -983,7 +1034,10 @@ class ObsidianConnectSidebarView extends ItemView {
 
     if (rows.length === 0) {
       const emptyEl = section.createDiv({ cls: "oc-empty" });
-      emptyEl.innerHTML = `<svg class="oc-empty-icon" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span>${this.driveVaults === null ? "Google Drive no conectado." : "No hay bóvedas todavía."}</span>`;
+      emptyEl.appendChild(makeSvg(32, 32, "0 0 24 24", 1.5, [
+        { tag: "path", d: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" },
+      ], "oc-empty-icon"));
+      emptyEl.createEl("span", { text: this.driveVaults === null ? "Google Drive no conectado." : "No hay bóvedas todavía." });
       const createBtn = emptyEl.createEl("button", { cls: "oc-empty-create", text: "+ Crear bóveda desde esta vault" });
       createBtn.addEventListener("click", async () => {
         createBtn.disabled = true;
@@ -1004,7 +1058,9 @@ class ObsidianConnectSidebarView extends ItemView {
       const card = section.createDiv({ cls: "oc-vault-card" + (isActive ? " oc-active" : "") });
 
       const top = card.createDiv({ cls: "oc-vault-top" });
-      top.innerHTML = `<svg class="oc-vault-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
+      top.appendChild(makeSvg(15, 15, "0 0 24 24", 2.5, [
+        { tag: "path", d: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" },
+      ], "oc-vault-icon"));
       const meta = top.createDiv({ cls: "oc-vault-meta" });
       meta.createEl("div", { cls: "oc-vault-name", text: displayName });
       if (displaySlug) meta.createEl("div", { cls: "oc-vault-slug", text: displaySlug });
@@ -1035,7 +1091,7 @@ class ObsidianConnectSidebarView extends ItemView {
 
       if (hasDrive && hasLocal) {
         const pshBtn = actions.createEl("button", { cls: "oc-card-btn" });
-        pshBtn.innerHTML = `↑ Push`;
+        pshBtn.textContent = "↑ Push";
         pshBtn.title = "Subir cambios a Drive";
         pshBtn.addEventListener("click", async () => {
           pshBtn.disabled = true;
@@ -1044,7 +1100,7 @@ class ObsidianConnectSidebarView extends ItemView {
           pshBtn.disabled = false;
         });
         const pllBtn = actions.createEl("button", { cls: "oc-card-btn" });
-        pllBtn.innerHTML = `↓ Pull`;
+        pllBtn.textContent = "↓ Pull";
         pllBtn.title = "Descargar cambios de Drive";
         pllBtn.addEventListener("click", async () => {
           pllBtn.disabled = true;
@@ -1054,7 +1110,7 @@ class ObsidianConnectSidebarView extends ItemView {
         });
       } else if (!hasDrive && hasLocal) {
         const uploadBtn = actions.createEl("button", { cls: "oc-card-btn oc-card-btn-accent" });
-        uploadBtn.innerHTML = `↑ Subir a Drive`;
+        uploadBtn.textContent = "↑ Subir a Drive";
         uploadBtn.addEventListener("click", async () => {
           uploadBtn.disabled = true;
           uploadBtn.textContent = "Subiendo...";
@@ -1063,7 +1119,7 @@ class ObsidianConnectSidebarView extends ItemView {
         });
       } else if (hasDrive && !hasLocal) {
         const importBtn = actions.createEl("button", { cls: "oc-card-btn oc-card-btn-accent" });
-        importBtn.innerHTML = `↓ Importar de Drive`;
+        importBtn.textContent = "↓ Importar de Drive";
         importBtn.addEventListener("click", async () => {
           importBtn.disabled = true;
           importBtn.textContent = "Importando...";
@@ -1095,19 +1151,6 @@ class ObsidianConnectSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     containerEl.createEl("h2", { text: "obsidianConnect" });
-
-    new Setting(containerEl)
-      .setName("Backend URL")
-      .setDesc("Direccion base del backend FastAPI.")
-      .addText((text) =>
-        text
-          .setPlaceholder("http://localhost:8000")
-          .setValue(this.plugin.settings.backendUrl)
-          .onChange(async (value) => {
-            this.plugin.settings.backendUrl = value.trim() || DEFAULT_SETTINGS.backendUrl;
-            await this.plugin.saveSettings();
-          })
-      );
 
     new Setting(containerEl)
       .setName("Email")
@@ -1364,7 +1407,9 @@ class VaultBrowserModal extends Modal {
       const isCurrent = item.id === this.plugin.settings.selectedVaultId;
       const card = this.listEl.createDiv({ cls: "oc-modal-card" + (isCurrent ? " oc-modal-current" : "") });
 
-      card.innerHTML = `<svg class="oc-modal-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
+      card.appendChild(makeSvg(18, 18, "0 0 24 24", 2, [
+        { tag: "path", d: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" },
+      ], "oc-modal-icon"));
 
       const info = card.createDiv({ cls: "oc-modal-info" });
       info.createEl("div", { cls: "oc-modal-name", text: item.name || "Sin nombre" });
@@ -1397,8 +1442,8 @@ class VaultBrowserModal extends Modal {
   }
 }
 
-function buildUrl(baseUrl, path, query) {
-  const normalizedBase = String(baseUrl || DEFAULT_SETTINGS.backendUrl).replace(/\/+$/, "");
+function buildUrl(path, query) {
+  const normalizedBase = BACKEND_URL.replace(/\/+$/, "");
   const normalizedPath = path.startsWith("/") ? path : "/" + path;
   const url = new URL(normalizedBase + normalizedPath);
   if (query) {
@@ -1582,4 +1627,24 @@ function sleep(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function makeSvg(w, h, viewBox, strokeWidth, children, cls) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("width", String(w));
+  svg.setAttribute("height", String(h));
+  svg.setAttribute("viewBox", viewBox);
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", String(strokeWidth));
+  if (cls) svg.setAttribute("class", cls);
+  for (const child of children) {
+    const el = document.createElementNS(NS, child.tag);
+    for (const [k, v] of Object.entries(child)) {
+      if (k !== "tag") el.setAttribute(k, String(v));
+    }
+    svg.appendChild(el);
+  }
+  return svg;
 }

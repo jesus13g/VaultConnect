@@ -1,9 +1,9 @@
 {
-  "id": "obsidian-connect",
-  "name": "obsidianConnect",
+  "id": "vault-connect",
+  "name": "VaultConnect",
   "version": "0.1.0",
   "minAppVersion": "1.5.0",
-  "description": "Conecta tu vault de Obsidian con obsidianConnect, selecciona vaults visualmente, enlaza Google Drive y sincroniza cambios incrementales.",
+  "description": "Sync your Obsidian vault with a backend and Google Drive, browse vaults visually, and push or pull incremental changes.",
   "author": "jesus13g",
   "authorUrl": "https://github.com/jesus13g",
   "fundingUrl": "",

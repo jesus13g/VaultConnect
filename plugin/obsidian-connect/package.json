@@ -1,0 +1,13 @@
+{
+  "name": "vault-connect",
+  "version": "0.1.0",
+  "description": "Sync your Obsidian vault with a backend and Google Drive.",
+  "main": "main.js",
+  "scripts": {
+    "build": "esbuild main.js --bundle --external:obsidian --external:electron --outfile=dist/main.js --platform=node --target=es2018",
+    "dev": "esbuild main.js --bundle --external:obsidian --external:electron --outfile=dist/main.js --platform=node --target=es2018 --watch"
+  },
+  "devDependencies": {
+    "esbuild": "^0.20.0"
+  }
+}
