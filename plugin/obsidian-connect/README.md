@@ -25,9 +25,9 @@ Alternatively, install manually by copying `main.js` and `manifest.json` into `.
 ## Configuration
 
 1. Open **Settings** → **VaultConnect**.
-2. Enter your **Email** and **Password**, then click **Login email** — or click **Login con Google** to authenticate via Google OAuth.
-3. Once logged in, click **Selector visual** to pick an existing remote vault, or **Crear desde esta bóveda** to create a new one from your current vault.
-4. Optionally click **Conectar Google Drive** to link a Drive folder to the selected vault.
+2. Enter your **Email** and **Password**, then click **Login email** — or click **Login with Google** to authenticate via Google OAuth.
+3. Once logged in, click **Select vault** to pick an existing remote vault, or **Create from this vault** to create a new one from your current vault.
+4. Optionally click **Connect Google Drive** to link a Drive folder to the selected vault.
 
 ## Usage
 
@@ -37,7 +37,7 @@ Use the sidebar panel (cloud icon in the left ribbon) or the toolbar buttons:
 |--------|--------|
 | **Push** | Upload local changes to the backend |
 | **Pull** | Download remote changes to your vault |
-| **Nueva** | Create a new remote vault from the current local vault |
+| **New** | Create a new remote vault from the current local vault |
 | **Web** | Open the backend web panel in your browser |
 
 You can also run any of these via the Command Palette (`Ctrl/Cmd+P` → search "VaultConnect").
