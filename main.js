@@ -11,18 +11,18 @@ const {
 
 const SIDEBAR_VIEW_TYPE = "obsidian-connect-sidebar";
 
-const BACKEND_URL = "https://backend-production-13e05.up.railway.app/";
-
 const DEFAULT_SETTINGS = {
   email: "",
   password: "",
   accessToken: "",
+  serverUrl: "https://backend-production-13e05.up.railway.app",
   selectedVaultId: "",
   selectedVaultName: "",
   deviceName: "obsidian-desktop",
   excludedPrefixes: [".obsidian/", ".trash/", ".git/"],
   batchSize: 50,
   oauthPollSeconds: 120,
+  autoSync: false,
   localSnapshot: {},
   remoteSnapshot: {},
   lastPushAt: "",
@@ -33,6 +33,8 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
 
+    this._pendingSync = new Map();
+
     this.registerView(SIDEBAR_VIEW_TYPE, (leaf) => new ObsidianConnectSidebarView(leaf, this));
 
     this.addSettingTab(new ObsidianConnectSettingTab(this.app, this));
@@ -40,65 +42,49 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
     this.addCommand({
       id: "obsidian-connect-login",
       name: "obsidianConnect: iniciar sesion en backend",
-      callback: async () => {
-        await this.login();
-      },
+      callback: async () => { await this.login(); },
     });
 
     this.addCommand({
       id: "obsidian-connect-select-vault",
       name: "obsidianConnect: selector visual de vaults",
-      callback: async () => {
-        await this.selectVault();
-      },
+      callback: async () => { await this.selectVault(); },
     });
 
     this.addCommand({
       id: "obsidian-connect-create-vault",
       name: "obsidianConnect: crear vault en backend desde la boveda actual",
-      callback: async () => {
-        await this.createBackendVaultFromCurrentVault();
-      },
+      callback: async () => { await this.createBackendVaultFromCurrentVault(); },
     });
 
     this.addCommand({
       id: "obsidian-connect-google-login",
       name: "obsidianConnect: iniciar sesion con Google",
-      callback: async () => {
-        await this.loginWithGoogle();
-      },
+      callback: async () => { await this.loginWithGoogle(); },
     });
 
     this.addCommand({
       id: "obsidian-connect-google-drive",
       name: "obsidianConnect: conectar Google Drive para tu cuenta",
-      callback: async () => {
-        await this.connectGoogleDrive();
-      },
+      callback: async () => { await this.connectGoogleDrive(); },
     });
 
     this.addCommand({
       id: "obsidian-connect-open-web",
       name: "obsidianConnect: abrir panel web del backend",
-      callback: async () => {
-        this.openBackendWeb();
-      },
+      callback: async () => { this.openBackendWeb(); },
     });
 
     this.addCommand({
       id: "obsidian-connect-push-vault",
       name: "obsidianConnect: sincronizacion incremental hacia el backend",
-      callback: async () => {
-        await this.pushVault();
-      },
+      callback: async () => { await this.pushVault(); },
     });
 
     this.addCommand({
       id: "obsidian-connect-pull-vault",
       name: "obsidianConnect: descargar solo cambios remotos",
-      callback: async () => {
-        await this.pullVault();
-      },
+      callback: async () => { await this.pullVault(); },
     });
 
     this.addRibbonIcon("cloud", "obsidianConnect: subir cambios", async () => {
@@ -116,15 +102,99 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
     this.addCommand({
       id: "obsidian-connect-open-sidebar",
       name: "obsidianConnect: abrir panel lateral",
-      callback: async () => {
-        await this.activateSidebarView();
-      },
+      callback: async () => { await this.activateSidebarView(); },
     });
+
+    // File event listeners for auto-sync
+    this.registerEvent(this.app.vault.on("create", (file) => this._onFileCreate(file)));
+    this.registerEvent(this.app.vault.on("modify", (file) => this._onFileModify(file)));
+    this.registerEvent(this.app.vault.on("delete", (file) => this._onFileDelete(file)));
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this._onFileRename(file, oldPath)));
 
     this.app.workspace.onLayoutReady(async () => {
       await this.activateSidebarView();
     });
   }
+
+  onunload() {
+    for (const timer of this._pendingSync.values()) {
+      clearTimeout(timer);
+    }
+    this._pendingSync.clear();
+  }
+
+  // ── File event handlers ──────────────────────────────────────────
+
+  _onFileCreate(file) {
+    if (!this.settings.autoSync || !this.settings.selectedVaultId) return;
+    if (this.isExcluded(file.path)) return;
+    this._debounceFileSync(file.path, () => this.uploadSingleFile(file));
+  }
+
+  _onFileModify(file) {
+    if (!this.settings.autoSync || !this.settings.selectedVaultId) return;
+    if (this.isExcluded(file.path)) return;
+    this._debounceFileSync(file.path, () => this.uploadSingleFile(file));
+  }
+
+  _onFileDelete(file) {
+    if (!this.settings.autoSync || !this.settings.selectedVaultId) return;
+    if (this.isExcluded(file.path)) return;
+    this.deleteSingleFile(file.path).catch(() => {});
+  }
+
+  _onFileRename(file, oldPath) {
+    if (!this.settings.autoSync || !this.settings.selectedVaultId) return;
+    if (this.isExcluded(file.path)) return;
+    this.renameSingleFile(oldPath, file.path).catch(() => {});
+  }
+
+  _debounceFileSync(path, fn) {
+    if (this._pendingSync.has(path)) {
+      clearTimeout(this._pendingSync.get(path));
+    }
+    const timer = setTimeout(async () => {
+      this._pendingSync.delete(path);
+      try { await fn(); } catch (_e) {}
+    }, 5000);
+    this._pendingSync.set(path, timer);
+  }
+
+  // ── Single file operations ───────────────────────────────────────
+
+  async uploadSingleFile(file) {
+    const vaultId = this.settings.selectedVaultId;
+    if (!vaultId) return;
+    const item = await this.buildSyncItem(file);
+    await this.request("/api/v1/vaults/" + encodeURIComponent(vaultId) + "/files", {
+      method: "POST",
+      body: item,
+    });
+  }
+
+  async deleteSingleFile(path) {
+    const vaultId = this.settings.selectedVaultId;
+    if (!vaultId) return;
+    await this.request("/api/v1/vaults/" + encodeURIComponent(vaultId) + "/files", {
+      method: "DELETE",
+      body: { path: normalizePath(path), provider: "google_drive" },
+    });
+  }
+
+  async renameSingleFile(oldPath, newPath) {
+    const vaultId = this.settings.selectedVaultId;
+    if (!vaultId) return;
+    await this.request("/api/v1/vaults/" + encodeURIComponent(vaultId) + "/files", {
+      method: "PATCH",
+      body: {
+        old_path: normalizePath(oldPath),
+        new_path: normalizePath(newPath),
+        provider: "google_drive",
+      },
+    });
+  }
+
+  // ── Sidebar & vault management ───────────────────────────────────
 
   async activateSidebarView() {
     const { workspace } = this.app;
@@ -183,9 +253,12 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
     await this.pushVault(vault.id);
   }
 
+  // ── Settings ─────────────────────────────────────────────────────
+
   async loadSettings() {
     const saved = await this.loadData() || {};
     this.settings = { ...DEFAULT_SETTINGS, ...saved };
+    this.settings.serverUrl = this.settings.serverUrl || DEFAULT_SETTINGS.serverUrl;
     this.settings.excludedPrefixes = normalizeExcludedPrefixes(this.settings.excludedPrefixes);
     this.settings.localSnapshot = ensureObject(this.settings.localSnapshot);
     this.settings.remoteSnapshot = ensureObject(this.settings.remoteSnapshot);
@@ -194,6 +267,7 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
   }
 
   async saveSettings() {
+    this.settings.serverUrl = this.settings.serverUrl || DEFAULT_SETTINGS.serverUrl;
     this.settings.excludedPrefixes = normalizeExcludedPrefixes(this.settings.excludedPrefixes);
     this.settings.localSnapshot = ensureObject(this.settings.localSnapshot);
     this.settings.remoteSnapshot = ensureObject(this.settings.remoteSnapshot);
@@ -201,6 +275,8 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
     this.settings.oauthPollSeconds = getOauthPollSeconds(this.settings.oauthPollSeconds);
     await this.saveData(this.settings);
   }
+
+  // ── Auth ─────────────────────────────────────────────────────────
 
   async login() {
     if (!this.settings.email || !this.settings.password) {
@@ -224,6 +300,32 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
     return response;
   }
 
+  async logout() {
+    try {
+      await this.request("/api/v1/auth/logout", { method: "POST" });
+    } catch (_e) {
+      // Ignorar errores del backend al cerrar sesion
+    }
+    this.settings.accessToken = "";
+    await this.saveSettings();
+    new Notice("Sesion cerrada.");
+    this.refreshSidebarView();
+  }
+
+  async register(email, password, name) {
+    const response = await this.request("/api/v1/auth/register", {
+      method: "POST",
+      body: { email, password, name },
+      skipAuth: true,
+    });
+    this.settings.accessToken = response.access_token;
+    this.settings.email = email;
+    await this.saveSettings();
+    new Notice("Cuenta creada e iniciada sesion: " + (response.user?.email || email));
+    this.refreshSidebarView();
+    return response;
+  }
+
   async ensureToken() {
     if (this.settings.accessToken) {
       return this.settings.accessToken;
@@ -231,113 +333,6 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
 
     const response = await this.login();
     return response ? response.access_token : null;
-  }
-
-  async request(path, options = {}) {
-    const method = options.method || "GET";
-    const skipAuth = Boolean(options.skipAuth);
-    const retried = Boolean(options.retried);
-    const token = skipAuth ? "" : await this.ensureToken();
-    const url = buildUrl(path, options.query);
-
-    const headers = Object.assign(
-      {
-        Accept: "application/json",
-      },
-      options.headers || {}
-    );
-
-    if (options.body !== undefined) {
-      headers["Content-Type"] = "application/json";
-    }
-
-    if (token) {
-      headers.Authorization = "Bearer " + token;
-    }
-
-    const response = await requestUrl({
-      url,
-      method,
-      headers,
-      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-      throw: false,
-    });
-
-    if (response.status === 401 && !skipAuth && !retried) {
-      this.settings.accessToken = "";
-      await this.saveSettings();
-      await this.login();
-      return this.request(path, Object.assign({}, options, { retried: true }));
-    }
-
-    const payload = parseJsonResponse(response.text);
-    if (response.status >= 400) {
-      const message =
-        (payload && (payload.detail || payload.message)) ||
-        "Error HTTP " + String(response.status);
-      throw new Error(message);
-    }
-
-    return payload;
-  }
-
-  async fetchVaults(showNotice) {
-    const vaults = await this.request("/api/v1/vaults");
-    if (showNotice) {
-      new Notice("Vaults cargados: " + String(vaults.length));
-    }
-    return vaults;
-  }
-
-  async selectVault() {
-    const vaults = await this.fetchVaults(false);
-    if (!vaults.length) {
-      new Notice("No hay bovedas en el backend todavia.");
-      return null;
-    }
-
-    return new Promise((resolve) => {
-      let settled = false;
-      const settle = (value) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        resolve(value);
-      };
-
-      const modal = new VaultBrowserModal(this.app, this, vaults, async (vault) => {
-        this.settings.selectedVaultId = vault.id;
-        this.settings.selectedVaultName = vault.name;
-        await this.saveSettings();
-        new Notice("Vault vinculado: " + vault.name);
-        settle(vault);
-      }, () => {
-        settle(null);
-      });
-      modal.open();
-    });
-  }
-
-  async createBackendVaultFromCurrentVault() {
-    const name = this.app.vault.getName();
-    const payload = {
-      name,
-      slug: slugify(name),
-      description: "Vault creado desde el plugin de Obsidian",
-      local_path: getVaultBasePath(this.app),
-    };
-
-    const vault = await this.request("/api/v1/vaults", {
-      method: "POST",
-      body: payload,
-    });
-
-    this.settings.selectedVaultId = vault.id;
-    this.settings.selectedVaultName = vault.name;
-    await this.saveSettings();
-    new Notice("Vault creado y vinculado: " + vault.name);
-    return vault;
   }
 
   async loginWithGoogle() {
@@ -377,7 +372,7 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
           return result;
         }
       } catch (_err) {
-        // Aún no está listo, seguir intentando
+        // Aun no esta listo, seguir intentando
       }
       await sleep(stepMs);
     }
@@ -442,16 +437,115 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
   }
 
   openBackendWeb() {
-    const url = buildUrl("/", null);
+    const url = buildUrl(this.settings.serverUrl, "/", null);
     openExternalUrl(url);
     new Notice("Panel web abierto.");
   }
 
+  // ── HTTP client ──────────────────────────────────────────────────
+
+  async request(path, options = {}) {
+    const method = options.method || "GET";
+    const skipAuth = Boolean(options.skipAuth);
+    const retried = Boolean(options.retried);
+    const token = skipAuth ? "" : await this.ensureToken();
+    const url = buildUrl(this.settings.serverUrl, path, options.query);
+
+    const headers = Object.assign({ Accept: "application/json" }, options.headers || {});
+
+    if (options.body !== undefined) {
+      headers["Content-Type"] = "application/json";
+    }
+
+    if (token) {
+      headers.Authorization = "Bearer " + token;
+    }
+
+    const response = await requestUrl({
+      url,
+      method,
+      headers,
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      throw: false,
+    });
+
+    if (response.status === 401 && !skipAuth && !retried) {
+      this.settings.accessToken = "";
+      await this.saveSettings();
+      await this.login();
+      return this.request(path, Object.assign({}, options, { retried: true }));
+    }
+
+    const payload = parseJsonResponse(response.text);
+    if (response.status >= 400) {
+      const message =
+        (payload && (payload.detail || payload.message)) ||
+        "Error HTTP " + String(response.status);
+      throw new Error(message);
+    }
+
+    return payload;
+  }
+
+  // ── Vault selection ──────────────────────────────────────────────
+
+  async fetchVaults(showNotice) {
+    const vaults = await this.request("/api/v1/vaults");
+    if (showNotice) {
+      new Notice("Vaults cargados: " + String(vaults.length));
+    }
+    return vaults;
+  }
+
+  async selectVault() {
+    const vaults = await this.fetchVaults(false);
+    if (!vaults.length) {
+      new Notice("No hay bovedas en el backend todavia.");
+      return null;
+    }
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+
+      const modal = new VaultBrowserModal(this.app, this, vaults, async (vault) => {
+        this.settings.selectedVaultId = vault.id;
+        this.settings.selectedVaultName = vault.name;
+        await this.saveSettings();
+        new Notice("Vault vinculado: " + vault.name);
+        settle(vault);
+      }, () => { settle(null); });
+      modal.open();
+    });
+  }
+
+  async createBackendVaultFromCurrentVault() {
+    const name = this.app.vault.getName();
+    const payload = {
+      name,
+      slug: slugify(name),
+      description: "Vault creado desde el plugin de Obsidian",
+      local_path: getVaultBasePath(this.app),
+    };
+
+    const vault = await this.request("/api/v1/vaults", { method: "POST", body: payload });
+
+    this.settings.selectedVaultId = vault.id;
+    this.settings.selectedVaultName = vault.name;
+    await this.saveSettings();
+    new Notice("Vault creado y vinculado: " + vault.name);
+    return vault;
+  }
+
+  // ── Sync ─────────────────────────────────────────────────────────
+
   async pushVault(overrideVaultId) {
     const vaultId = overrideVaultId || await this.ensureSelectedVault();
-    if (!vaultId) {
-      return;
-    }
+    if (!vaultId) return;
 
     const files = this.getSyncableFiles();
     if (!files.length) {
@@ -482,10 +576,7 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
       });
       new Notice(
         "obsidianConnect: lote " +
-          String(index + 1) +
-          " de " +
-          String(batches.length) +
-          " enviado."
+          String(index + 1) + " de " + String(batches.length) + " enviado."
       );
     }
 
@@ -498,9 +589,7 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
 
   async pullVault(overrideVaultId) {
     const vaultId = overrideVaultId || await this.ensureSelectedVault();
-    if (!vaultId) {
-      return;
-    }
+    if (!vaultId) return;
 
     new Notice("Solicitando cambios remotos...");
     await this.request("/api/v1/vaults/" + encodeURIComponent(vaultId) + "/sync/pull", {
@@ -523,9 +612,7 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
       const path = normalizePath(file.path);
       const payload = await this.request(
         "/api/v1/vaults/" + encodeURIComponent(vaultId) + "/files/content",
-        {
-          query: { path },
-        }
+        { query: { path } }
       );
 
       await ensureParentFolder(this.app, path);
@@ -559,9 +646,7 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
 
     for (const file of files) {
       const path = normalizePath(file.path);
-      if (this.isExcluded(path)) {
-        continue;
-      }
+      if (this.isExcluded(path)) continue;
 
       const remoteSignature = getRemoteSignature(file);
       const snapshot = this.settings.remoteSnapshot[path];
@@ -599,6 +684,7 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
 
     if (isTextFile(file.extension, mimeType)) {
       item.content = await this.app.vault.cachedRead(file);
+      item.content_hash = await sha256(item.content);
       return item;
     }
 
@@ -653,6 +739,8 @@ module.exports = class ObsidianConnectPlugin extends Plugin {
     return selected ? selected.id : "";
   }
 };
+
+// ── Sidebar View ──────────────────────────────────────────────────────────────
 
 class ObsidianConnectSidebarView extends ItemView {
   constructor(leaf, plugin) {
@@ -772,9 +860,7 @@ class ObsidianConnectSidebarView extends ItemView {
       .oc-action-btn:hover:not(:disabled) { background:var(--background-modifier-hover); color:var(--text-normal); }
       .oc-action-btn:active:not(:disabled) { transform:scale(.94); }
       .oc-action-btn:disabled { opacity:.32; cursor:default; }
-      .oc-act-primary {
-        background:var(--interactive-accent); color:var(--text-on-accent);
-      }
+      .oc-act-primary { background:var(--interactive-accent); color:var(--text-on-accent); }
       .oc-act-primary:hover:not(:disabled) { filter:brightness(1.1); background:var(--interactive-accent); }
       .oc-error {
         margin:8px 14px; padding:8px 12px; border-radius:8px;
@@ -866,6 +952,10 @@ class ObsidianConnectSidebarView extends ItemView {
       }
       .oc-ts { font-size:10px; color:var(--text-faint); display:flex; gap:4px; align-items:center; }
       .oc-ts-lbl { font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
+      .oc-autosync-badge {
+        font-size:10px; font-weight:600; padding:1px 7px; border-radius:20px;
+        background:rgba(76,175,80,.15); color:#4caf50; margin-left:auto;
+      }
     `;
 
     // ── Header ─────────────────────────────────────────────────────
@@ -896,24 +986,24 @@ class ObsidianConnectSidebarView extends ItemView {
     }
     reloadBtn.addEventListener("click", () => this.loadAndRender());
 
-    // ── Sin sesión ──────────────────────────────────────────────────
+    // ── Sin sesion ──────────────────────────────────────────────────
     if (!this.plugin.settings.accessToken) {
       const loginSection = containerEl.createDiv({ cls: "oc-login" });
       loginSection.createEl("h3", { cls: "oc-login-title", text: "Conectar cuenta" });
-      loginSection.createEl("p", { cls: "oc-login-desc", text: "Inicia sesión para sincronizar tu bóveda con Google Drive." });
+      loginSection.createEl("p", { cls: "oc-login-desc", text: "Inicia sesion para sincronizar tu boveda con Google Drive." });
 
       const googleBtn = loginSection.createEl("button", { cls: "oc-login-btn oc-login-primary" });
       googleBtn.appendChild(makeSvg(15, 15, "0 0 24 24", 2, [
         { tag: "circle", cx: "12", cy: "12", r: "10" },
         { tag: "path", d: "M12 8v8m-4-4h8" },
       ]));
-      googleBtn.appendChild(document.createTextNode(" Iniciar sesión con Google"));
+      googleBtn.appendChild(document.createTextNode(" Iniciar sesion con Google"));
       googleBtn.addEventListener("click", async () => {
         googleBtn.disabled = true;
         googleBtn.textContent = "Abriendo navegador...";
         await this.plugin.loginWithGoogle();
         googleBtn.disabled = false;
-        googleBtn.textContent = "Iniciar sesión con Google";
+        googleBtn.textContent = "Iniciar sesion con Google";
       });
 
       const emailBtn = loginSection.createEl("button", { cls: "oc-login-btn oc-login-secondary" });
@@ -949,6 +1039,10 @@ class ObsidianConnectSidebarView extends ItemView {
       });
     }
 
+    if (this.plugin.settings.autoSync) {
+      connEl.createEl("span", { cls: "oc-autosync-badge", text: "Auto-sync ON" });
+    }
+
     // ── Error ──────────────────────────────────────────────────────
     if (this.driveError) {
       containerEl.createDiv({ cls: "oc-error", text: this.driveError });
@@ -961,7 +1055,7 @@ class ObsidianConnectSidebarView extends ItemView {
     const pushBtn = toolbar.createEl("button", { cls: "oc-action-btn" + (hasVault ? " oc-act-primary" : "") });
     pushBtn.disabled = !hasVault;
     pushBtn.setAttribute("aria-label", "Subir cambios");
-    pushBtn.title = hasVault ? "Subir cambios locales a Drive" : "Selecciona una bóveda primero";
+    pushBtn.title = hasVault ? "Subir cambios locales a Drive" : "Selecciona una boveda primero";
     pushBtn.appendChild(makeSvg(14, 14, "0 0 24 24", 2.5, [
       { tag: "path", d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" },
       { tag: "polyline", points: "17 8 12 3 7 8" },
@@ -977,7 +1071,7 @@ class ObsidianConnectSidebarView extends ItemView {
     const pullBtn = toolbar.createEl("button", { cls: "oc-action-btn" + (hasVault ? " oc-act-primary" : "") });
     pullBtn.disabled = !hasVault;
     pullBtn.setAttribute("aria-label", "Descargar cambios");
-    pullBtn.title = hasVault ? "Descargar cambios remotos" : "Selecciona una bóveda primero";
+    pullBtn.title = hasVault ? "Descargar cambios remotos" : "Selecciona una boveda primero";
     pullBtn.appendChild(makeSvg(14, 14, "0 0 24 24", 2.5, [
       { tag: "path", d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" },
       { tag: "polyline", points: "7 10 12 15 17 10" },
@@ -991,8 +1085,8 @@ class ObsidianConnectSidebarView extends ItemView {
     });
 
     const newBtn = toolbar.createEl("button", { cls: "oc-action-btn" });
-    newBtn.setAttribute("aria-label", "Crear bóveda");
-    newBtn.title = "Crear bóveda en backend desde la vault actual";
+    newBtn.setAttribute("aria-label", "Crear boveda");
+    newBtn.title = "Crear boveda en backend desde la vault actual";
     newBtn.appendChild(makeSvg(14, 14, "0 0 24 24", 2.5, [
       { tag: "path", d: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" },
       { tag: "line", x1: "12", y1: "11", x2: "12", y2: "17" },
@@ -1023,22 +1117,22 @@ class ObsidianConnectSidebarView extends ItemView {
       ldEl.appendChild(makeSvg(24, 24, "0 0 24 24", 2, [
         { tag: "path", d: "M21 12a9 9 0 1 1-6.219-8.56" },
       ], "oc-empty-icon oc-spin"));
-      ldEl.createEl("span", { text: "Cargando bóvedas..." });
+      ldEl.createEl("span", { text: "Cargando bovedas..." });
       return;
     }
 
     // ── Vault list ─────────────────────────────────────────────────
     const rows = this._buildMergedList();
     const section = containerEl.createDiv({ cls: "oc-section" });
-    section.createDiv({ cls: "oc-section-label", text: "Bóvedas" });
+    section.createDiv({ cls: "oc-section-label", text: "Bovedas" });
 
     if (rows.length === 0) {
       const emptyEl = section.createDiv({ cls: "oc-empty" });
       emptyEl.appendChild(makeSvg(32, 32, "0 0 24 24", 1.5, [
         { tag: "path", d: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" },
       ], "oc-empty-icon"));
-      emptyEl.createEl("span", { text: this.driveVaults === null ? "Google Drive no conectado." : "No hay bóvedas todavía." });
-      const createBtn = emptyEl.createEl("button", { cls: "oc-empty-create", text: "+ Crear bóveda desde esta vault" });
+      emptyEl.createEl("span", { text: this.driveVaults === null ? "Google Drive no conectado." : "No hay bovedas todavia." });
+      const createBtn = emptyEl.createEl("button", { cls: "oc-empty-create", text: "+ Crear boveda desde esta vault" });
       createBtn.addEventListener("click", async () => {
         createBtn.disabled = true;
         try { await this.plugin.createBackendVaultFromCurrentVault(); await this.loadAndRender(); }
@@ -1079,7 +1173,7 @@ class ObsidianConnectSidebarView extends ItemView {
 
       if (!isActive && hasLocal) {
         const selBtn = actions.createEl("button", { cls: "oc-card-btn", text: "Usar" });
-        selBtn.title = "Vincular como bóveda activa";
+        selBtn.title = "Vincular como boveda activa";
         selBtn.addEventListener("click", async () => {
           this.plugin.settings.selectedVaultId = vault.id;
           this.plugin.settings.selectedVaultName = vault.name;
@@ -1140,6 +1234,8 @@ class ObsidianConnectSidebarView extends ItemView {
   }
 }
 
+// ── Settings Tab ──────────────────────────────────────────────────────────────
+
 class ObsidianConnectSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -1152,9 +1248,28 @@ class ObsidianConnectSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h2", { text: "obsidianConnect" });
 
+    // ── Servidor ───────────────────────────────────────────────────
+    containerEl.createEl("h3", { text: "Servidor" });
+
+    new Setting(containerEl)
+      .setName("URL del servidor")
+      .setDesc("Direccion base del backend. Ejemplo: http://localhost:8000")
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_SETTINGS.serverUrl)
+          .setValue(this.plugin.settings.serverUrl)
+          .onChange(async (value) => {
+            this.plugin.settings.serverUrl = value.trim() || DEFAULT_SETTINGS.serverUrl;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    // ── Cuenta ────────────────────────────────────────────────────
+    containerEl.createEl("h3", { text: "Cuenta" });
+
     new Setting(containerEl)
       .setName("Email")
-      .setDesc("Cuenta del backend para iniciar sesion desde el plugin.")
+      .setDesc("Cuenta del backend para iniciar sesion.")
       .addText((text) =>
         text.setValue(this.plugin.settings.email).onChange(async (value) => {
           this.plugin.settings.email = value.trim();
@@ -1164,7 +1279,7 @@ class ObsidianConnectSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Contrasena")
-      .setDesc("Se guarda en local solo para esta fase del plugin.")
+      .setDesc("Se guarda en local solo para login automatico.")
       .addText((text) => {
         text.inputEl.type = "password";
         text.setValue(this.plugin.settings.password).onChange(async (value) => {
@@ -1172,6 +1287,132 @@ class ObsidianConnectSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         });
       });
+
+    new Setting(containerEl)
+      .setName("Sesion")
+      .setDesc(
+        this.plugin.settings.accessToken
+          ? "Sesion activa."
+          : "Sin sesion iniciada."
+      )
+      .addButton((button) =>
+        button.setButtonText("Login email").onClick(async () => {
+          await this.plugin.login();
+          this.display();
+        })
+      )
+      .addButton((button) =>
+        button.setCta().setButtonText("Login con Google").onClick(async () => {
+          await this.plugin.loginWithGoogle();
+          this.display();
+        })
+      )
+      .addButton((button) =>
+        button.setButtonText("Cerrar sesion").onClick(async () => {
+          await this.plugin.logout();
+          this.display();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Registro")
+      .setDesc("Crear una cuenta nueva con email y contrasena.")
+      .addButton((button) =>
+        button.setButtonText("Registrarse").onClick(async () => {
+          if (!this.plugin.settings.email || !this.plugin.settings.password) {
+            new Notice("Rellena email y contrasena antes de registrarte.");
+            return;
+          }
+          await this.plugin.register(
+            this.plugin.settings.email,
+            this.plugin.settings.password,
+            this.plugin.settings.email.split("@")[0]
+          );
+          this.display();
+        })
+      );
+
+    // ── Vault ─────────────────────────────────────────────────────
+    containerEl.createEl("h3", { text: "Boveda" });
+
+    new Setting(containerEl)
+      .setName("Vault vinculado")
+      .setDesc(
+        this.plugin.settings.selectedVaultId
+          ? this.plugin.settings.selectedVaultName +
+              " (" + this.plugin.settings.selectedVaultId.slice(0, 8) + ")"
+          : "Todavia no hay vault seleccionado."
+      )
+      .addButton((button) =>
+        button.setButtonText("Selector visual").onClick(async () => {
+          await this.plugin.selectVault();
+          this.display();
+        })
+      )
+      .addButton((button) =>
+        button.setButtonText("Crear desde esta boveda").onClick(async () => {
+          await this.plugin.createBackendVaultFromCurrentVault();
+          this.display();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Google Drive")
+      .setDesc("Lanza la autorizacion OAuth para conectar Google Drive.")
+      .addButton((button) =>
+        button.setCta().setButtonText("Conectar Google Drive").onClick(async () => {
+          await this.plugin.connectGoogleDrive();
+        })
+      )
+      .addButton((button) =>
+        button.setButtonText("Abrir panel web").onClick(() => {
+          this.plugin.openBackendWeb();
+        })
+      );
+
+    // ── Sincronizacion ────────────────────────────────────────────
+    containerEl.createEl("h3", { text: "Sincronizacion" });
+
+    new Setting(containerEl)
+      .setName("Sincronizacion automatica")
+      .setDesc("Subir cambios al guardar un archivo (debounce 5s).")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.autoSync).onChange(async (value) => {
+          this.plugin.settings.autoSync = value;
+          await this.plugin.saveSettings();
+          new Notice("Auto-sync " + (value ? "activado" : "desactivado") + ".");
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Sincronizacion manual")
+      .setDesc(
+        "Ultimo push: " + formatTimestamp(this.plugin.settings.lastPushAt) +
+        " | Ultimo pull: " + formatTimestamp(this.plugin.settings.lastPullAt)
+      )
+      .addButton((button) =>
+        button.setButtonText("Subir cambios").onClick(async () => {
+          await this.plugin.pushVault();
+          this.display();
+        })
+      )
+      .addButton((button) =>
+        button.setButtonText("Descargar cambios").onClick(async () => {
+          await this.plugin.pullVault();
+          this.display();
+        })
+      )
+      .addButton((button) =>
+        button.setButtonText("Reindexar cache").onClick(async () => {
+          await this.plugin.refreshLocalSnapshot();
+          await this.plugin.saveSettings();
+          new Notice("Cache local reindexada.");
+          this.display();
+        })
+      );
+
+    // ── Avanzado ──────────────────────────────────────────────────
+    containerEl.createEl("h3", { text: "Avanzado" });
 
     new Setting(containerEl)
       .setName("Nombre del dispositivo")
@@ -1200,7 +1441,7 @@ class ObsidianConnectSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Tamano de lote")
-      .setDesc("Numero maximo de archivos por envio incremental.")
+      .setDesc("Numero maximo de archivos por envio incremental (max 200).")
       .addText((text) =>
         text.setValue(String(this.plugin.settings.batchSize)).onChange(async (value) => {
           this.plugin.settings.batchSize = getBatchSize(Number(value));
@@ -1217,102 +1458,10 @@ class ObsidianConnectSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
-
-    new Setting(containerEl)
-      .setName("Sesion del backend")
-      .setDesc(
-        this.plugin.settings.accessToken
-          ? "Hay un token local listo para usar."
-          : "Todavia no hay sesion iniciada."
-      )
-      .addButton((button) =>
-        button.setButtonText("Login email").onClick(async () => {
-          await this.plugin.login();
-          this.display();
-        })
-      )
-      .addButton((button) =>
-        button.setCta().setButtonText("Login con Google").onClick(async () => {
-          await this.plugin.loginWithGoogle();
-          this.display();
-        })
-      )
-      .addButton((button) =>
-        button.setButtonText("Cerrar sesion").onClick(async () => {
-          this.plugin.settings.accessToken = "";
-          await this.plugin.saveSettings();
-          new Notice("Token local eliminado.");
-          this.display();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Vault vinculado")
-      .setDesc(
-        this.plugin.settings.selectedVaultId
-          ? this.plugin.settings.selectedVaultName +
-              " (" +
-              this.plugin.settings.selectedVaultId.slice(0, 8) +
-              ")"
-          : "Todavia no hay vault del backend seleccionado."
-      )
-      .addButton((button) =>
-        button.setButtonText("Selector visual").onClick(async () => {
-          await this.plugin.selectVault();
-          this.display();
-        })
-      )
-      .addButton((button) =>
-        button.setButtonText("Crear desde esta boveda").onClick(async () => {
-          await this.plugin.createBackendVaultFromCurrentVault();
-          this.display();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Google Drive")
-      .setDesc("Lanza la autorizacion OAuth para el vault seleccionado y espera la confirmacion.")
-      .addButton((button) =>
-        button.setCta().setButtonText("Conectar Google Drive").onClick(async () => {
-          await this.plugin.connectGoogleDrive();
-        })
-      )
-      .addButton((button) =>
-        button.setButtonText("Abrir panel web").onClick(() => {
-          this.plugin.openBackendWeb();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Sincronizacion incremental")
-      .setDesc(
-        "Ultimo push: " +
-          formatTimestamp(this.plugin.settings.lastPushAt) +
-          " | Ultimo pull: " +
-          formatTimestamp(this.plugin.settings.lastPullAt)
-      )
-      .addButton((button) =>
-        button.setButtonText("Subir cambios").onClick(async () => {
-          await this.plugin.pushVault();
-          this.display();
-        })
-      )
-      .addButton((button) =>
-        button.setButtonText("Descargar cambios").onClick(async () => {
-          await this.plugin.pullVault();
-          this.display();
-        })
-      )
-      .addButton((button) =>
-        button.setButtonText("Reindexar cache").onClick(async () => {
-          await this.plugin.refreshLocalSnapshot();
-          await this.plugin.saveSettings();
-          new Notice("Cache local reindexada.");
-          this.display();
-        })
-      );
   }
 }
+
+// ── VaultBrowserModal ─────────────────────────────────────────────────────────
 
 class VaultBrowserModal extends Modal {
   constructor(app, plugin, items, onChoose, onDismiss) {
@@ -1331,65 +1480,33 @@ class VaultBrowserModal extends Modal {
     const style = contentEl.createEl("style");
     style.textContent = `
       .obsidian-connect-vault-modal { padding:0 !important; }
-      .oc-modal-header {
-        padding:20px 24px 14px;
-        border-bottom:1px solid var(--background-modifier-border);
-      }
+      .oc-modal-header { padding:20px 24px 14px; border-bottom:1px solid var(--background-modifier-border); }
       .oc-modal-title { font-size:16px; font-weight:700; margin:0 0 4px; color:var(--text-normal); }
       .oc-modal-desc { font-size:12px; color:var(--text-muted); margin:0; line-height:1.5; }
-      .oc-modal-list {
-        padding:14px 20px 20px; display:flex; flex-direction:column; gap:8px;
-        max-height:420px; overflow-y:auto;
-      }
+      .oc-modal-list { padding:14px 20px 20px; display:flex; flex-direction:column; gap:8px; max-height:420px; overflow-y:auto; }
       .oc-modal-card {
         border:1px solid var(--background-modifier-border); border-radius:10px;
         padding:12px 14px; display:flex; align-items:center; gap:12px;
         background:var(--background-primary-alt); transition:border-color .15s;
       }
       .oc-modal-card:hover { border-color:var(--background-modifier-border-hover,var(--interactive-accent)); }
-      .oc-modal-card.oc-modal-current {
-        border-color:var(--interactive-accent);
-        box-shadow:inset 3px 0 0 var(--interactive-accent);
-      }
+      .oc-modal-card.oc-modal-current { border-color:var(--interactive-accent); box-shadow:inset 3px 0 0 var(--interactive-accent); }
       .oc-modal-icon { color:var(--interactive-accent); flex-shrink:0; }
       .oc-modal-info { flex:1; min-width:0; }
-      .oc-modal-name {
-        font-size:13px; font-weight:600; color:var(--text-normal);
-        overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-      }
-      .oc-modal-meta {
-        font-size:11px; color:var(--text-muted); margin-top:2px;
-        overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-      }
-      .oc-modal-desc-text {
-        font-size:11px; color:var(--text-faint); margin-top:1px;
-        overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-      }
-      .oc-modal-badge-current {
-        display:inline-block; margin-top:5px; font-size:10px; font-weight:600;
-        padding:2px 7px; border-radius:20px;
-        background:rgba(66,133,244,.15); color:var(--interactive-accent);
-      }
-      .oc-modal-select-btn {
-        padding:6px 14px; border-radius:7px; cursor:pointer; font-size:12px;
-        font-weight:600; border:none; background:var(--interactive-accent);
-        color:var(--text-on-accent); flex-shrink:0; transition:filter .15s,transform .1s;
-      }
+      .oc-modal-name { font-size:13px; font-weight:600; color:var(--text-normal); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .oc-modal-meta { font-size:11px; color:var(--text-muted); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .oc-modal-desc-text { font-size:11px; color:var(--text-faint); margin-top:1px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .oc-modal-badge-current { display:inline-block; margin-top:5px; font-size:10px; font-weight:600; padding:2px 7px; border-radius:20px; background:rgba(66,133,244,.15); color:var(--interactive-accent); }
+      .oc-modal-select-btn { padding:6px 14px; border-radius:7px; cursor:pointer; font-size:12px; font-weight:600; border:none; background:var(--interactive-accent); color:var(--text-on-accent); flex-shrink:0; transition:filter .15s,transform .1s; }
       .oc-modal-select-btn:hover { filter:brightness(1.1); }
       .oc-modal-select-btn:active { transform:scale(.97); }
-      .oc-modal-select-btn.oc-modal-btn-current {
-        background:var(--background-secondary); color:var(--text-muted);
-        border:1px solid var(--background-modifier-border);
-        cursor:default;
-      }
-      .oc-modal-empty {
-        text-align:center; padding:24px; color:var(--text-muted); font-size:13px;
-      }
+      .oc-modal-select-btn.oc-modal-btn-current { background:var(--background-secondary); color:var(--text-muted); border:1px solid var(--background-modifier-border); cursor:default; }
+      .oc-modal-empty { text-align:center; padding:24px; color:var(--text-muted); font-size:13px; }
     `;
 
     const header = contentEl.createDiv({ cls: "oc-modal-header" });
-    header.createEl("h2", { cls: "oc-modal-title", text: "Seleccionar bóveda" });
-    header.createEl("p", { cls: "oc-modal-desc", text: "Elige el vault del backend que quieres vincular con esta bóveda de Obsidian." });
+    header.createEl("h2", { cls: "oc-modal-title", text: "Seleccionar boveda" });
+    header.createEl("p", { cls: "oc-modal-desc", text: "Elige el vault del backend que quieres vincular con esta boveda de Obsidian." });
 
     this.listEl = contentEl.createDiv({ cls: "oc-modal-list" });
     this.renderList();
@@ -1442,8 +1559,10 @@ class VaultBrowserModal extends Modal {
   }
 }
 
-function buildUrl(path, query) {
-  const normalizedBase = BACKEND_URL.replace(/\/+$/, "");
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function buildUrl(serverUrl, path, query) {
+  const normalizedBase = (serverUrl || DEFAULT_SETTINGS.serverUrl).replace(/\/+$/, "");
   const normalizedPath = path.startsWith("/") ? path : "/" + path;
   const url = new URL(normalizedBase + normalizedPath);
   if (query) {
@@ -1457,9 +1576,7 @@ function buildUrl(path, query) {
 }
 
 function parseJsonResponse(text) {
-  if (!text) {
-    return {};
-  }
+  if (!text) return {};
   try {
     return JSON.parse(text);
   } catch (_error) {
@@ -1506,6 +1623,14 @@ function isTextFile(extension, mimeType) {
   );
 }
 
+async function sha256(content) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(content);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 function arrayBufferToBase64(buffer) {
   return Buffer.from(buffer).toString("base64");
 }
@@ -1548,17 +1673,13 @@ function trimTrailingSlash(value) {
 
 function getBatchSize(value) {
   const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    return DEFAULT_SETTINGS.batchSize;
-  }
+  if (!Number.isFinite(parsed) || parsed < 1) return DEFAULT_SETTINGS.batchSize;
   return Math.min(Math.floor(parsed), 200);
 }
 
 function getOauthPollSeconds(value) {
   const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 15) {
-    return DEFAULT_SETTINGS.oauthPollSeconds;
-  }
+  if (!Number.isFinite(parsed) || parsed < 15) return DEFAULT_SETTINGS.oauthPollSeconds;
   return Math.min(Math.floor(parsed), 600);
 }
 
@@ -1591,9 +1712,7 @@ function getRemoteSignature(file) {
 }
 
 function formatTimestamp(value) {
-  if (!value) {
-    return "nunca";
-  }
+  if (!value) return "nunca";
   try {
     return new Date(value).toLocaleString();
   } catch (_error) {
@@ -1609,7 +1728,7 @@ function openExternalUrl(url) {
       return;
     }
   } catch (_error) {
-    // Fallback to the browser below.
+    // Fallback to window.open
   }
 
   if (typeof window !== "undefined" && typeof window.open === "function") {
@@ -1624,9 +1743,7 @@ function generateNonce() {
 }
 
 function sleep(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
 }
 
 function makeSvg(w, h, viewBox, strokeWidth, children, cls) {
